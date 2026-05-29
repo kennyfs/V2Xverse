@@ -285,7 +285,7 @@ sampling (C(4,3) = 4 distinct subsets possible).
 | PGD steps K | 10 |
 | Step size α | 2.5 × ε\_abs / K |
 | Budget ε\_abs | ε × Q₉₅(non-zero \|features\|) |
-| ε (relative) | 0.3 |
+| ε (relative) | 0.2 |
 | FP loss | mean(σ(ŷ) × 1[ego\_conf < 0.15]) |
 | FN loss | −mean(σ(ŷ) × σ(y\_ego)) |
 
