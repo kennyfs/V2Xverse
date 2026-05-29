@@ -176,6 +176,21 @@ birdview_v2_cache/
 # root
 external_paths/
 
+# research reports (local only)
+Report/
+
+# huggingface model repo (binary weights, tracked separately)
+v2xverse/
+
+# claude memory
+.claude/
+
+# temp / local notes
+prompt_*.md
+tree.txt
+AmongUs.pdf
+CP-Guard.pdf
+
 # simulation
 carla/
 simulation/birdview_v2_cache/

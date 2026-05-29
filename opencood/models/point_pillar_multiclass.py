@@ -102,6 +102,99 @@ class PointPillarMulticlass(nn.Module):
         for p in self.reg_head.parameters():
             p.requires_grad = False
 
+    # ------------------------------------------------------------------
+    # CP-Guard addition (see CHANGELOG.md)
+    # ------------------------------------------------------------------
+    def encode(self, data_dict):
+        """
+        Run the encoding pipeline (VFE -> scatter -> backbone -> shrink) for
+        all CAVs and return per-CAV BEV feature maps together with the
+        normalised pairwise transformation matrix.
+
+        This method is used by CP-Guard's PASAC algorithm so that the
+        expensive encoding step is executed only once, while the fusion +
+        decode step can be called repeatedly for different collaborator subsets.
+
+        Parameters
+        ----------
+        data_dict : dict
+            Standard ego batch dict from the dataloader (same as forward()).
+
+        Returns
+        -------
+        spatial_features_2d : torch.Tensor
+            [N_total, C, H, W].  One row per CAV; index 0 is always the ego.
+        t_matrix_norm : torch.Tensor
+            [B, max_cav, max_cav, 2, 3].  Normalised affine matrices (output
+            of normalize_pairwise_tfm), computed at the scatter resolution
+            (before backbone stride) to stay consistent with forward().
+        record_len : torch.Tensor
+            [B] number of CAVs per scene in the batch.
+        """
+        voxel_features    = data_dict['processed_lidar']['voxel_features']
+        voxel_coords      = data_dict['processed_lidar']['voxel_coords']
+        voxel_num_points  = data_dict['processed_lidar']['voxel_num_points']
+        record_len        = data_dict['record_len']
+
+        batch_dict = {
+            'voxel_features':   voxel_features,
+            'voxel_coords':     voxel_coords,
+            'voxel_num_points': voxel_num_points,
+            'record_len':       record_len,
+        }
+
+        # VFE + scatter
+        batch_dict = self.pillar_vfe(batch_dict)
+        batch_dict = self.scatter(batch_dict)
+
+        # Normalise t_matrix using scatter-output resolution (H0, W0),
+        # matching the same call site as in forward().
+        _, _, H0, W0 = batch_dict['spatial_features'].shape
+        t_matrix_norm = normalize_pairwise_tfm(
+            data_dict['pairwise_t_matrix'], H0, W0, self.voxel_size[0]
+        )
+
+        # Backbone + optional shrink / compression
+        batch_dict = self.backbone(batch_dict)
+        spatial_features_2d = batch_dict['spatial_features_2d']
+
+        if self.shrink_flag:
+            spatial_features_2d = self.shrink_conv(spatial_features_2d)
+
+        if self.compression:
+            spatial_features_2d = self.naive_compressor(spatial_features_2d)
+
+        return spatial_features_2d, None, t_matrix_norm, record_len
+
+    def fuse_decode_subset(self, raw_features, psm_single,
+                           t_matrix, record_len, subset_indices):
+        """Fuse a subset of CAV features and decode to (cls, bbox, fused).
+
+        raw_features already has shrink/compression applied (from encode()).
+        subset_indices: list[int] — 0 = ego, 1..N-1 = collaborators.
+        """
+        n = len(subset_indices)
+        dev = raw_features.device
+
+        idx = torch.tensor(subset_indices, dtype=torch.long, device=dev)
+        sub_feats = raw_features[idx]   # [n, C, H, W]
+
+        # Build subset pairwise t_matrix [B, n, n, 2, 3] → pad to original shape
+        sub_t = t_matrix[:, subset_indices, :, :, :][:, :, subset_indices, :, :]
+        full_t = torch.zeros_like(t_matrix)
+        full_t[:, :n, :n, :, :] = sub_t
+
+        sub_rl = torch.tensor([n], dtype=record_len.dtype, device=dev)
+
+        fused = self.fusion_net(sub_feats, sub_rl, full_t)
+        cls   = self.cls_head(fused)
+        bbox  = self.reg_head(fused)
+
+        scaled = (F.interpolate(fused, scale_factor=2, mode='nearest')
+                  if fused.size(2) == 48 else fused)
+        return cls, bbox, scaled
+    # ------------------------------------------------------------------
+
     def forward(self, data_dict):
         voxel_features = data_dict['processed_lidar']['voxel_features']
         voxel_coords = data_dict['processed_lidar']['voxel_coords']

@@ -940,8 +940,11 @@ def getLatemulticlassFusionDataset(cls):
                 
                 if self.visualize:
                     origin_lidar = [cav_content['origin_lidar']]
-                    if (self.params['only_vis_ego'] is False) or (cav_id=='ego'):
-                        projected_lidar = copy.deepcopy(cav_content['origin_lidar'])
+                    if (self.params.get('only_vis_ego', False) is False) or (cav_id=='ego'):
+                        src = cav_content['origin_lidar']
+                        if hasattr(src, 'numpy'):
+                            src = src.numpy()
+                        projected_lidar = src[:, :3].copy()
                         projected_lidar[:, :3] = \
                             box_utils.project_points_by_matrix_torch(
                                 projected_lidar[:, :3],

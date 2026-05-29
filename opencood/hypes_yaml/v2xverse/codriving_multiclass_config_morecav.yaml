@@ -1,17 +1,28 @@
-name: v2xverse_late_multiclass
+name: v2xverse_codriving_morecav
 root_dir: external_paths/data_root
 validate_dir: external_paths/data_root
 test_dir: external_paths/data_root
 
+# morecav-specific index files (routes 0-4=test, 5+=train)
+train_index_file: dataset/weather-0-morecav/dataset_index_train
+validate_index_file: dataset/weather-0-morecav/dataset_index_test
+test_index_file: dataset/weather-0-morecav/dataset_index_test
+
+# All morecav data is from Town05
+train_towns: [5]
+validate_towns: [5]
+test_towns: [5]
+
 yaml_parser: load_point_pillar_params
 
 train_params:
-  batch_size: 4
-  epoches: 40
+  batch_size: 1
+  epoches: 35
   eval_freq: 1
   max_cav: 5
   save_freq: 1
-  drop_last: true
+
+frame_stride: 2
 
 input_source: ['lidar']
 label_type: lidar
@@ -22,7 +33,7 @@ fusion:
   args:
     clip_pc: false
     proj_first: false
-  core_method: latemulticlass
+  core_method: intermediatemulticlass
   dataset: v2xverse
 
 preprocess:
@@ -73,7 +84,7 @@ postprocess:
     score_threshold: 0.2
 
 model:
-  core_method: point_pillar_multiclass
+  core_method: center_point_codriving
   args:
     anchor_number: 3
     voxel_size: *voxel_size
@@ -82,10 +93,6 @@ model:
     multi_class: true
     out_size_factor: 2
     supervise_single: true
-    fusion_method: max
-
-    att:
-      feat_dim: 64
 
     base_bev_backbone:
       compression: 0
@@ -100,12 +107,19 @@ model:
     fusion_args:
       agg_operator:
         feature_dim: 256
-        mode: MAX
-      downsample_rate: 2
+        mode: ATTEN
+      communication:
+        thre: 0
+        cav_lidar_range: *lidar_range
+        driving_request: False
+        gaussian_smooth:
+          k_size: 160
+          c_sigma: 5
+      downsample_rate: 1
       dropout_rate: 0
       in_channels: 256
       layer_nums: *id002
-      multi_scale: false
+      multi_scale: true
       n_head: 8
       num_filters: *id003
       only_attention: true
@@ -129,8 +143,8 @@ model:
 loss:
   core_method: center_point_loss_multiclass
   args:
-    cls_weight: 5.0
-    code_weights: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 5.0, 5.0]
+    cls_weight: 20.0
+    code_weights: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 20.0, 20.0]
     loc_weight: 1.0
     target_assigner_config:
       box_coder: ResidualCoder
@@ -140,28 +154,17 @@ loss:
       min_radius: 2
       out_size_factor: 2
       voxel_size: *voxel_size
-    pos_cls_weight: 1.0
-    cls:
-      type: 'SigmoidFocalLoss'
-      alpha: 0.25
-      gamma: 2.0
-      weight: 1.0
-    reg:
-      type: 'WeightedSmoothL1Loss'
-      sigma: 3.0
-      codewise: true
-      weight: 2.0
 
 optimizer:
   args:
     eps: 1.0e-10
-    weight_decay: 0.0002
+    weight_decay: 1e-4
   core_method: Adam
-  lr: 0.0005
+  lr: 0.00002
 
 lr_scheduler:
   core_method: multistep
   gamma: 0.1
   step_size:
-  - 8
-  - 15
+  - 100
+  - 200

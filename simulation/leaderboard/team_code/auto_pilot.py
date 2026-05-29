@@ -208,7 +208,9 @@ class AutoPilot(MapAgent):
         # disturb waypoint
         if self.waypoint_disturb > 0.01:
             print("Setup waypoint disturb!")
-            updated_route = self.disturb_waypoints(self._waypoint_planner.route)
+            import copy
+            route_snapshot = copy.deepcopy(self._waypoint_planner.route)  # ← 加這行
+            updated_route = self.disturb_waypoints(route_snapshot)
             self.endpoint = []
             for i in range(self.ego_vehicles_num):
                 self.endpoint.append(updated_route[i][-1][0])
@@ -238,7 +240,10 @@ class AutoPilot(MapAgent):
         for route_id in range(route_num):
             route_tmp = deque()
             np.random.seed(self.waypoint_disturb_seed)
-            for pos, command in route[route_id]:
+            
+            current_route = list(route[route_id])  # ← 加這一行，取快照
+            
+            for pos, command in current_route:
                 if command == RoadOption.LANEFOLLOW or command == RoadOption.STRAIGHT:
                     waypoint = self._map.get_waypoint(carla.Location(pos[1], -pos[0]))
                     if np.random.random() < 0.5:

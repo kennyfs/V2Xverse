@@ -149,6 +149,7 @@ class BaseAgent(autonomous_agent.AutonomousAgent):
         self.waypoint_disturb = self.config.get("waypoint_disturb", 0)
         self.waypoint_disturb_seed = self.config.get("waypoint_disturb_seed", 2021)
         self.rgb_only = self.config.get("rgb_only", True)
+        self.minimal_sensors = self.config.get("minimal_sensors", False)
         self.ego_vehicles_num = ego_vehicles_num
 
         # initialize and create data saving directory
@@ -448,7 +449,19 @@ class BaseAgent(autonomous_agent.AutonomousAgent):
             },
             {"type": "sensor.speedometer", "reading_frequency": 20, "id": "speed"},
         ]
-        if self.rgb_only:
+        if self.minimal_sensors:
+            # Keep only RGB cameras + regular lidar + GPS/IMU/speed; drop depth, seg, semantic lidar.
+            sensors_list = [
+                x for x in sensors_list
+                if x["type"] in [
+                    "sensor.camera.rgb",
+                    "sensor.lidar.ray_cast",
+                    "sensor.other.imu",
+                    "sensor.other.gnss",
+                    "sensor.speedometer",
+                ]
+            ]
+        elif self.rgb_only:
             sensors_list = [
                 x
                 for x in sensors_list
@@ -464,7 +477,7 @@ class BaseAgent(autonomous_agent.AutonomousAgent):
 
     def tick(self, input_data, vehicle_num):
 
-        if not self.rgb_only:
+        if not self.rgb_only and not self.minimal_sensors:
             affordances = self._get_affordances()
 
             traffic_lights = self._find_obstacle("*traffic_light*")
@@ -517,7 +530,20 @@ class BaseAgent(autonomous_agent.AutonomousAgent):
 
         weather = self._weather_to_dict(self._world.get_weather())
 
-        if self.rgb_only:
+        if self.minimal_sensors:
+            return {
+                "rgb_front_{}".format(self.vehicle_num): rgb_front,
+                "rgb_rear_{}".format(self.vehicle_num): rgb_rear,
+                "rgb_left_{}".format(self.vehicle_num): rgb_left,
+                "rgb_right_{}".format(self.vehicle_num): rgb_right,
+                "lidar_{}".format(self.vehicle_num): input_data["lidar_{}".format(self.vehicle_num)][1],
+                "gps_{}".format(self.vehicle_num): gps,
+                "move_state_{}".format(self.vehicle_num): move_state,
+                "compass_{}".format(self.vehicle_num): compass,
+                "imu_{}".format(self.vehicle_num): imu,
+                "weather": weather,
+            }
+        elif self.rgb_only:
             return {
                 "rgb_front_{}".format(self.vehicle_num): rgb_front,
                 "rgb_rear_{}".format(self.vehicle_num): rgb_rear,
@@ -676,12 +702,18 @@ class BaseAgent(autonomous_agent.AutonomousAgent):
             f.close()
 
             # BEV map
-            self.birdview = BirdViewProducer.as_rgb(
-            self.birdview_producer.produce(agent_vehicle=self._vehicle )
-            )
-            Image.fromarray(self.birdview).save(
-                self.save_path_tmp / "birdview" / ("%04d.jpg" % frame)
-            )
+            if self.minimal_sensors:
+                # Skip expensive birdview rendering; save blank to keep directory structure intact
+                Image.fromarray(np.zeros((400, 400, 3), dtype=np.uint8)).save(
+                    self.save_path_tmp / "birdview" / ("%04d.jpg" % frame)
+                )
+            else:
+                self.birdview = BirdViewProducer.as_rgb(
+                self.birdview_producer.produce(agent_vehicle=self._vehicle )
+                )
+                Image.fromarray(self.birdview).save(
+                    self.save_path_tmp / "birdview" / ("%04d.jpg" % frame)
+                )
 
             # camera rgb, depth, segmentation, 2d bounding box
             for pos in ["front", "left", "right", "rear"]:
@@ -690,8 +722,8 @@ class BaseAgent(autonomous_agent.AutonomousAgent):
                 Image.fromarray(tick_data[name]).save(
                     self.save_path_tmp / name_save / ("%04d.jpg" % frame)
                 )
-                if not self.rgb_only and pos != "rear":
-                    for sensor_type in ["depth", "seg"]:  # , 
+                if not self.rgb_only and not self.minimal_sensors and pos != "rear":
+                    for sensor_type in ["depth", "seg"]:  # ,
                         name = sensor_type + "_" + pos + "_{}".format(self.vehicle_num)
                         name_save = sensor_type + "_" + pos
                         Image.fromarray(tick_data[name]).save(
@@ -706,7 +738,7 @@ class BaseAgent(autonomous_agent.AutonomousAgent):
                             allow_pickle=True,
                         )
 
-            if not self.rgb_only:
+            if not self.rgb_only and not self.minimal_sensors:
                 Image.fromarray(tick_data["topdown" + "_{}".format(self.vehicle_num)]).save(
                     self.save_path_tmp / "topdown" / ("%04d.jpg" % frame)
                 )
@@ -739,6 +771,13 @@ class BaseAgent(autonomous_agent.AutonomousAgent):
                     tick_data["3d_bbs" + "_{}".format(self.vehicle_num)],
                     allow_pickle=True,
                 )
+            if self.minimal_sensors:
+                np.save(
+                    self.save_path_tmp / "lidar" / ("%04d.npy" % frame),
+                    tick_data["lidar" + "_{}".format(self.vehicle_num)],
+                    allow_pickle=True,
+                )
+
         return frame
 
     def collect_actor_data(self):
@@ -1247,34 +1286,26 @@ class BaseAgent(autonomous_agent.AutonomousAgent):
                 bounding_box_set = self._world.get_level_bbs(carla.CityObjectLabel.TrafficSigns)
             # Filter the list to extract bounding boxes within a 50m radius
             for bbox in bounding_box_set:
-                distance_to_car = bbox.location.distance(self._vehicle.get_location())
-                if 0 < distance_to_car <= max_distance:
+                try:
                     loc = bbox.location
-                    ori = bbox.rotation
-                    extent = bbox.extent
-                    # _rotation_matrix = self.get_matrix(
-                    #     carla.Transform(
-                    #         carla.Location(0, 0, 0), bbox.rotation
-                    #     )
-                    # )
+                    distance_to_car = loc.distance(self._vehicle.get_location())
+                except Exception:
+                    continue
 
-                    # rotated_extent = np.squeeze(
-                    #     np.array(
-                    #         (
-                    #             np.array([[extent.x, extent.y, extent.z, 1]])
-                    #             @ _rotation_matrix
-                    #         )[:3]
-                    #     )
-                    # )
+                if 0 < distance_to_car <= max_distance:
+                    try:
+                        ori = bbox.rotation
+                        extent = bbox.extent
+                    except Exception:
+                        continue
+
                     bb = np.array(
                         [
                             [loc.x, loc.y, loc.z],
                             [ori.roll, ori.pitch, ori.yaw],
-                            [extent.x, extent.y, extent.z]
-                            # [rotated_extent[0], rotated_extent[1], rotated_extent[2]],
+                            [extent.x, extent.y, extent.z],
                         ]
                     )
-
                     obst.append(bb)
         else: # original
             _actors = self._world.get_actors()

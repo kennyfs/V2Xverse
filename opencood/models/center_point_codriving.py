@@ -100,6 +100,113 @@ class centerpointcodriving(nn.Module):
         split_x = torch.tensor_split(x, cum_sum_len[:-1].cpu())
         return split_x
 
+    # ------------------------------------------------------------------
+    # ROBOSAC addition
+    # ------------------------------------------------------------------
+    def encode(self, data_dict):
+        """
+        Run the encoding pipeline (VFE -> scatter -> backbone -> shrink) for
+        all CAVs and return the cached tensors needed for ROBOSAC subset
+        fusion without re-encoding.
+
+        Returns
+        -------
+        raw_features : torch.Tensor
+            [sum_N, 64, H_scatter, W_scatter].  Scatter output, one row per
+            CAV (index 0 = ego).  Passed to CoDriving.forward as its first
+            argument in the multi-scale path.
+        psm_single : torch.Tensor
+            [sum_N, anchor_number, H', W'].  Per-CAV cls predictions computed
+            from the full backbone+shrink path.  Passed to CoDriving as `rm`.
+        pairwise_t_matrix : torch.Tensor
+            [B, max_cav, max_cav, 4, 4].  Raw (un-normalised) transformation
+            matrices, exactly as stored in data_dict.  CoDriving normalises
+            them internally, so we preserve the raw form here.
+        record_len : torch.Tensor
+            [B] number of valid CAVs per scene.
+        """
+        voxel_features   = data_dict['processed_lidar']['voxel_features']
+        voxel_coords     = data_dict['processed_lidar']['voxel_coords']
+        voxel_num_points = data_dict['processed_lidar']['voxel_num_points']
+        record_len       = data_dict['record_len']
+
+        batch_dict = {
+            'voxel_features':   voxel_features,
+            'voxel_coords':     voxel_coords,
+            'voxel_num_points': voxel_num_points,
+            'record_len':       record_len,
+        }
+
+        # VFE + scatter
+        batch_dict = self.pillar_vfe(batch_dict)
+        batch_dict = self.scatter(batch_dict)
+        # Clone so repeated fuse calls cannot corrupt the cached tensor.
+        raw_features = batch_dict['spatial_features'].clone()  # [sum_N, 64, H, W]
+
+        # Full backbone + optional shrink/compression → per-CAV cls predictions
+        batch_dict = self.backbone(batch_dict)
+        sf2d = batch_dict['spatial_features_2d']
+        if self.shrink_flag:
+            sf2d = self.shrink_conv(sf2d)
+        if self.compression:
+            sf2d = self.naive_compressor(sf2d)
+
+        psm_single = self.cls_head(sf2d)   # [sum_N, anchor_number, H', W']
+
+        return raw_features, psm_single, data_dict['pairwise_t_matrix'], record_len
+
+    def fuse_decode_subset(self, raw_features, psm_single, pairwise_t_matrix,
+                           record_len, indices):
+        """
+        Fuse a subset of pre-encoded CAV features and decode to (cls, bbox).
+
+        Parameters
+        ----------
+        raw_features : torch.Tensor
+            [sum_N, 64, H, W] — output of encode(), scatter resolution.
+        psm_single : torch.Tensor
+            [sum_N, anchor_number, H', W'] — per-CAV cls predictions.
+        pairwise_t_matrix : torch.Tensor
+            [1, max_cav, max_cav, 4, 4] — raw transformation matrices.
+        record_len : torch.Tensor
+            [1] — not used directly (we override with len(indices)).
+        indices : list[int]
+            CAV indices to fuse.  Must include 0 (ego) as the first element.
+
+        Returns
+        -------
+        cls  : torch.Tensor  [1, anchor_number, H', W']
+        bbox : torch.Tensor  [1, anchor_number*8, H', W']
+        fused_feature : torch.Tensor  [1, C, H', W']
+        """
+        device = raw_features.device
+        k = len(indices)
+        idx_t = torch.tensor(indices, device=device)
+
+        sub_raw = raw_features[idx_t]   # [k, 64, H, W]
+        sub_psm = psm_single[idx_t]     # [k, anchor_number, H', W']
+        sub_rl  = torch.tensor([k], dtype=torch.long, device=device)
+
+        # Build a [1, k, k, 4, 4] t_matrix for the subset.
+        eye4  = torch.eye(4, device=device)
+        new_t = eye4.view(1, 1, 1, 4, 4).expand(1, k, k, 4, 4).clone()
+        for new_i, orig_i in enumerate(indices):
+            for new_j, orig_j in enumerate(indices):
+                new_t[0, new_i, new_j] = pairwise_t_matrix[0, orig_i, orig_j]
+
+        if self.multi_scale:
+            fused, _, _ = self.fusion_net(sub_raw, sub_psm, sub_rl, new_t,
+                                          self.backbone)
+            if self.shrink_flag:
+                fused = self.shrink_conv(fused)
+        else:
+            fused, _, _ = self.fusion_net(sub_raw, sub_psm, sub_rl, new_t)
+
+        cls  = self.cls_head(fused)
+        bbox = self.reg_head(fused)
+        return cls, bbox, fused
+    # ------------------------------------------------------------------
+
     def forward(self, data_dict, waypoints=None):
         voxel_features = data_dict['processed_lidar']['voxel_features'] # e.g. (34814,32,4)
         voxel_coords = data_dict['processed_lidar']['voxel_coords']  #  e.g (34814,4)

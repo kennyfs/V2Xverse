@@ -69,6 +69,7 @@ def main():
     criterion = train_utils.create_loss(hypes)
 
     # optimizer setup
+    ACCUM_STEPS = hypes['train_params'].get('accum_steps', 4)
     optimizer = train_utils.setup_optimizer(hypes, model)
     # lr scheduler setup
     
@@ -109,15 +110,32 @@ def main():
             model.model_train_init()
         except:
             print("No model_train_init function")
+        optimizer.zero_grad()
         for i, batch_data in enumerate(train_loader):
             if batch_data is None or batch_data['ego']['object_bbx_mask'].sum()==0:
                 continue
-            model.zero_grad()
-            optimizer.zero_grad()
             batch_data = train_utils.to_device(batch_data, device)
             batch_data['ego']['epoch'] = epoch
-            ouput_dict = model(batch_data['ego'])
-            
+
+            # === 【修改區：動態攔截異常並列印資料集資訊】 ===
+            try:
+                ouput_dict = model(batch_data['ego'])
+            except Exception as e:
+                print("\n" + "🔥"*25)
+                print("【偵測到訓練中斷！正在為您定位有問題的資料...】")
+                print(f"原始錯誤訊息: {e}\n")
+
+                # 嘗試撈出 OpenCOOD 資料集常見的 metadata 識別欄位
+                for field in ['scenario_name', 'frame_id', 'sample_idx', 'item_idx', 'record_len']:
+                    if field in batch_data['ego']:
+                        print(f"👉 當前 Batch 的 {field}: {batch_data['ego'][field]}")
+
+                # 印出整個 ego 字典的 keys，以防欄位名稱在 V2Xverse 被改過
+                print(f"👉 batch_data['ego'] 包含的所有鍵值 (Keys): {list(batch_data['ego'].keys())}")
+                print("🔥"*25 + "\n")
+                raise e
+            # ===============================================
+
             final_loss = criterion(ouput_dict, batch_data['ego']['label_dict'])
             criterion.logging(epoch, i, len(train_loader), writer)
 
@@ -125,11 +143,12 @@ def main():
                 final_loss += criterion(ouput_dict, batch_data['ego']['label_dict_single'], suffix="_single") * hypes['train_params'].get("single_weight", 1)
                 criterion.logging(epoch, i, len(train_loader), writer, suffix="_single")
 
-            # back-propagation
-            final_loss.backward()
-            optimizer.step()
-
-            # torch.cuda.empty_cache()
+            # back-propagation with gradient accumulation
+            (final_loss / ACCUM_STEPS).backward()
+            if (i + 1) % ACCUM_STEPS == 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=35)
+                optimizer.step()
+                optimizer.zero_grad()
 
         if epoch % hypes['train_params']['eval_freq'] == 0:
             valid_ave_loss = []

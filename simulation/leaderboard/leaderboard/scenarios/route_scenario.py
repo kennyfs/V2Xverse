@@ -529,7 +529,7 @@ class RouteScenario(BasicScenario):
         draw waypoints coordinates from self.route
         """
         fig = plt.figure(dpi=400)
-        colors = ['tab:red','tab:blue','tab:orange', 'tab:purple','tab:green']
+        colors = ['tab:red','tab:blue','tab:orange', 'tab:purple','tab:green','tab:cyan','tab:pink','tab:gray']
         center_x = self.route[0][0][0].location.x
         center_y = self.route[0][0][0].location.y
         for i in range(len(self.route)):
@@ -537,13 +537,13 @@ class RouteScenario(BasicScenario):
                 point_x = self.route[i][j][0].location.x - center_x + 1*i
                 point_y = self.route[i][j][0].location.y - center_y + 1*i
                 if j==0:
-                    plt.scatter(point_x, point_y, s=50, c=colors[i], label='ego{}'.format(i))
+                    plt.scatter(point_x, point_y, s=50, c=colors[i % len(colors)], label='ego{}'.format(i))
                     plt.text(point_x+0.1, point_y+0.1, 'ego{} start'.format(i))
                 elif j==(len(self.route[i])-1):
-                    plt.scatter(point_x, point_y, s=50, c=colors[i])
+                    plt.scatter(point_x, point_y, s=50, c=colors[i % len(colors)])
                     plt.text(point_x+0.1, point_y+2*(i+1), 'ego{} end'.format(i))
                 else:
-                    plt.scatter(point_x, point_y, s=20, c=colors[i])
+                    plt.scatter(point_x, point_y, s=20, c=colors[i % len(colors)])
         plt.legend(loc='lower right')
         plt.savefig(os.path.join(self.log_dir,'point_coordinates.png'))
         plt.close()

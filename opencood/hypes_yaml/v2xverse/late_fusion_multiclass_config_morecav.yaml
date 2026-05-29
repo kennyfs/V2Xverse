@@ -1,13 +1,23 @@
-name: v2xverse_late_multiclass
+name: v2xverse_late_multiclass_morecav
 root_dir: external_paths/data_root
 validate_dir: external_paths/data_root
 test_dir: external_paths/data_root
 
+# morecav-specific index files (split by route number 0-4=test, 5+=train)
+train_index_file: dataset/weather-0-morecav/dataset_index_train
+validate_index_file: dataset/weather-0-morecav/dataset_index_test
+test_index_file: dataset/weather-0-morecav/dataset_index_test
+
+# All morecav data is from Town05 (town=5)
+train_towns: [5]
+validate_towns: [5]
+test_towns: [5]
+
 yaml_parser: load_point_pillar_params
 
 train_params:
-  batch_size: 4
-  epoches: 40
+  batch_size: 2
+  epoches: 31
   eval_freq: 1
   max_cav: 5
   save_freq: 1
@@ -157,11 +167,11 @@ optimizer:
     eps: 1.0e-10
     weight_decay: 0.0002
   core_method: Adam
-  lr: 0.0005
+  lr: 0.0001
 
 lr_scheduler:
   core_method: multistep
   gamma: 0.1
   step_size:
   - 8
-  - 15
+  - 12

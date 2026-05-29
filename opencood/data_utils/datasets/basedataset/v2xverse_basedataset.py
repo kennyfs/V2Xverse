@@ -54,15 +54,18 @@ class V2XVERSEBaseDataset(Dataset):
         self.test_flag = False
         if self.train:
             root_dir = params['root_dir']
-            towns = [1,2,3,4,6]
+            towns = params.get('train_towns', [1,2,3,4,6])
+            index_key = 'train_index_file'
         elif not visualize:
             root_dir = params['validate_dir']
-            towns = [7,10] # [6,7,8,9,10]
+            towns = params.get('validate_towns', [7,10])
+            index_key = 'validate_index_file'
         else:
             root_dir = params['test_dir']
-            towns = [5]
+            towns = params.get('test_towns', [5])
+            index_key = 'test_index_file'
             self.test_flag = True
-        self.root_dir = root_dir 
+        self.root_dir = root_dir
         self.clock = 0
 
         print("Dataset dir:", root_dir)
@@ -116,7 +119,9 @@ class V2XVERSEBaseDataset(Dataset):
         self.route_frames = []
 
         data_index_name = 'dataset_index.txt'
-        if 'index_file' in self.params:
+        if index_key in self.params:
+            data_index_name = self.params[index_key] + '.txt'
+        elif 'index_file' in self.params:
             data_index_name = self.params['index_file'] + '.txt'
         print('data_index_name:', data_index_name)
         dataset_indexs = self._load_text(data_index_name).split('\n')
@@ -153,7 +158,8 @@ class V2XVERSEBaseDataset(Dataset):
                     if rsu_file in rsu_files:
                         rsu_frame_len = len(os.listdir(os.path.join(route_path,rsu_file,'measurements')))
                         file_len_list.append(rsu_frame_len)
-            self.rsu_change_frame = max(file_len_list) + 1
+            if file_len_list:
+                self.rsu_change_frame = max(file_len_list) + 1
 
             for j, file in enumerate(ego_files):
                 ego_path = os.path.join(path, file)
@@ -162,7 +168,8 @@ class V2XVERSEBaseDataset(Dataset):
                 for others in others_list:
                     others_path_list.append(os.path.join(path, others))
 
-                for i in range(frames):
+                stride = self.params.get('frame_stride', 1) if self.train else 1
+                for i in range(0, frames, stride):
                     # reduce the ratio of frames not at junction
                     if filter_file is not None:
                         danger_frame_flag = False

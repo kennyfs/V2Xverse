@@ -320,14 +320,28 @@ def convert_affinematrix_to_homography(A):
 
 
 def warp_affine_simple(src, M, dsize,
-        mode='bilinear',
-        padding_mode='zeros',
-        align_corners=False):
+                       mode='bilinear',
+                       padding_mode='zeros',
+                       align_corners=False):
 
     B, C, H, W = src.size()
+    actual_B = M.size(0) 
+    
+    # === 終極防禦：動態對齊特徵圖與轉換矩陣的數量 ===
+    if B < actual_B:
+        # 狀況：點雲缺失導致特徵圖不夠（如 2 < 3），用全零張量補齊
+        pad_size = (actual_B - B, C, H, W)
+        padding = torch.zeros(pad_size, dtype=src.dtype, device=src.device)
+        src = torch.cat([src, padding], dim=0)
+    elif B > actual_B:
+        # 狀況：特徵圖多於矩陣，直接裁切
+        src = src[:actual_B]
+
+    # 此時 actual_B 與 src.size(0) 絕對完美相等
     grid = F.affine_grid(M,
-                         [B, C, dsize[0], dsize[1]],
+                         [actual_B, C, dsize[0], dsize[1]],
                          align_corners=align_corners).to(src)
+    
     return F.grid_sample(src, grid, align_corners=align_corners)
 
 def warp_affine(
