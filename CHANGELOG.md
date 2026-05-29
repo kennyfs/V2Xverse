@@ -115,7 +115,7 @@ Information Loss Rate (BILR) of ROBOSAC in an urban intersection setting
 | Config file | `opencood/hypes_yaml/v2xverse/late_fusion_multiclass_config_morecav.yaml` |
 | Checkpoint | `opencood/logs/codriving_morecav_finetune_2026_05_29/net_epoch_bestval_at22.pth` |
 | Architecture | CenterPoint-CoDriving (intermediate fusion, multi-class) |
-| Fine-tuned from | 4-CAV V2Xverse checkpoint; additional Morecav data |
+| Fine-tuned from | 2-CAV V2Xverse checkpoint (1 ego + 1 RSU); adapted to Morecav 5-CAV |
 | Epoch | 22 (best validation AP) |
 | File size | ~32 MB |
 
