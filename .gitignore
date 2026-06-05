@@ -227,10 +227,10 @@ utils_g/
 # simulation/leaderboard/team_code/agent_config_e2e_baseline
 # scripts/batch_run
 
-# baseline ckpt
-*.pth
-*.th
-*.ckpt
+# baseline ckpt (kept; morecav checkpoints are tracked)
+# *.pth
+# *.th
+# *.ckpt
 
 
 # auto-generated documentation
@@ -246,14 +246,12 @@ pip-wheel-metadata/
 
 
 # Pyre type checker
-logs/
 *.c
 
 
 # others
 pypcd/
 opv2v_data_dumping
-logs/
 dataset_link
 data_vis/
 icp/vis_result
@@ -269,9 +267,16 @@ box_align_items
 stage1_boxes/
 bash_script/
 dataset/
-opencood/logs
 opencood/logs_HEAL
 opencood/logs_baseline
+# exclude all log subdirs except the morecav experiment
+opencood/logs/morecav_finetune_2026_05_28/
+opencood/logs/v2xverse_late_multiclass_2026_05_25_22_25_00/
+opencood/logs/v2xverse_late_multiclass_2026_05_25_21_57_54/
+opencood/logs/v2xverse_late_multiclass_2026_05_25_22_01_33/
+opencood/logs/v2xverse_late_multiclass_2026_05_25_22_13_16/
+# exclude vis image folders within morecav experiment
+opencood/logs/codriving_morecav_finetune_2026_05_29/vis_*/
 opencood/models/heter_SECOND_lift_splat_2stage_dense_redet.py
 opencood/models/heter_SECOND_lift_splat_2stage_redet.py
 opencood/loss/heterception_redet_loss.py

@@ -1,0 +1,16 @@
+
+========================================
+ Attack: PGD-FN  eps=0.2  steps=5
+ ROBOSAC: eta=0.2  N=7  eps_cons=0.3
+========================================
+ Frames evaluated : 1000
+ Attacker rejected (TRR) : 631/1000 = 63.1%
+ Attacker accepted (FAR) : 369/1000 = 36.9%
+ Ego-only fallback       : 411/1000 = 41.1%
+
+ AP@0.5 comparison:
+   Class       No-def(atk)  ROBOSAC(def)  Recovery
+   Vehicle(0)  0.295        0.511        +0.216
+   Pedestr(1)  0.205        0.304        +0.099
+   Bicycle(3)  0.258        0.432        +0.174
+========================================
