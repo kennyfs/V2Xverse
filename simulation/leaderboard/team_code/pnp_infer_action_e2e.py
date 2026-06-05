@@ -531,24 +531,39 @@ class PnP_infer():
 		batch_data_perception = self.perception_dataloader.collate_batch_test(batch_data_perception, online_eval_only=True)
 		batch_data_perception = train_utils.to_device(batch_data_perception, self.device)
 		
-		infer_result = inference_utils.inference_intermediate_fusion_multiclass(batch_data_perception,
-														self.perception_model,
-														self.perception_dataloader,
-														online_eval_only=True)
-
-		############## end2end output ###########################
-		output_dict = OrderedDict()
-		for cav_id, cav_content in batch_data_perception.items():
-			output_dict[cav_id] = self.perception_model(cav_content)
-		pred_box_tensor, pred_score, gt_box_tensor = \
-			self.perception_dataloader.post_process_multiclass(batch_data_perception,
-								output_dict, online_eval_only=True)
-		infer_result = {"pred_box_tensor" : pred_box_tensor, \
-						"pred_score" : pred_score, \
-						"gt_box_tensor" : gt_box_tensor}
-		if "comm_rate" in output_dict['ego']:
-			infer_result.update({"comm_rate" : output_dict['ego']['comm_rate']})
-		############################################################
+		use_robosac = self.config['perception'].get('use_robosac', False)
+		if use_robosac:
+			robosac_args = self.config['perception'].get('robosac_args', {})
+			infer_result = inference_utils.inference_intermediate_fusion_multiclass_robosac(
+				batch_data_perception,
+				self.perception_model,
+				self.perception_dataloader,
+				**robosac_args,
+				online_eval_only=True
+			)
+			output_dict = infer_result['output_dict']
+			
+			if self.save_path is not None:
+				log_dir = self.save_path / "robosac_logs"
+				log_dir.mkdir(parents=True, exist_ok=True)
+				log_data = {"step": step}
+				log_data.update(infer_result['robosac_log'])
+				with open(log_dir / f"{step:05d}.json", 'w') as f:
+					json.dump(log_data, f, indent=4)
+		else:
+			############## end2end output ###########################
+			output_dict = OrderedDict()
+			for cav_id, cav_content in batch_data_perception.items():
+				output_dict[cav_id] = self.perception_model(cav_content)
+			pred_box_tensor, pred_score, gt_box_tensor = \
+				self.perception_dataloader.post_process_multiclass(batch_data_perception,
+									output_dict, online_eval_only=True)
+			infer_result = {"pred_box_tensor" : pred_box_tensor, \
+							"pred_score" : pred_score, \
+							"gt_box_tensor" : gt_box_tensor}
+			if "comm_rate" in output_dict['ego']:
+				infer_result.update({"comm_rate" : output_dict['ego']['comm_rate']})
+			############################################################
 
 		attrib_list = ['pred_box_tensor', 'pred_score', 'gt_box_tensor']
 		for attrib in attrib_list:

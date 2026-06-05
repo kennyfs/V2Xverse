@@ -819,4 +819,5 @@ def inference_intermediate_fusion_multiclass_robosac(
         'pred_score':      pred_score,
         'gt_box_tensor':   gt_box_tensor,
         'robosac_log':     robosac_log,
+        'output_dict':     output_dict,
     }
