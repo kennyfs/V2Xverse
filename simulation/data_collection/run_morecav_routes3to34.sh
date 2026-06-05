@@ -22,7 +22,7 @@ for ROUTE_SCRIPT in "${ROUTES[@]}"; do
     echo "========================================"
 
     # Start CARLA server
-    CUDA_VISIBLE_DEVICES=0 ${CARLA_ROOT}/CarlaUE4.sh \
+    ${CARLA_ROOT}/CarlaUE4.sh \
         --world-port=40000 \
         -opengl \
         -RenderOffScreen &
