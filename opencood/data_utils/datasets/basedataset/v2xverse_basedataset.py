@@ -483,19 +483,36 @@ class V2XVERSEBaseDataset(Dataset):
 
     def get_visible_actors(self, scene_dict, frame_id):
         visible_actors = {} # id only
+        loaded_cavs = 1
+        max_cav_limit = self.params['train_params']['max_cav']
         if self.test_flag:
             visible_actors['car_0'] = None
-            for i, route_dir in enumerate(scene_dict['other_egos']):
-                visible_actors['car_{}'.format(i+1)] = None
-            for i, rsu_dir in enumerate(scene_dict['rsu']):
-                visible_actors['rsu_{}'.format(i)] = None
+            if max_cav_limit > 1:
+                for i, route_dir in enumerate(scene_dict['other_egos']):
+                    if loaded_cavs >= max_cav_limit:
+                        break
+                    visible_actors['car_{}'.format(i+1)] = None
+                    loaded_cavs += 1
+                if loaded_cavs < max_cav_limit and len(scene_dict['rsu']) > 0:
+                    for i, rsu_dir in enumerate(scene_dict['rsu']):
+                        if loaded_cavs >= max_cav_limit:
+                            break
+                        visible_actors['rsu_{}'.format(i)] = None
+                        loaded_cavs += 1
         else:
             visible_actors['car_0'] = self.get_visible_actors_one_term(scene_dict['ego'], frame_id)
-            if self.params['train_params']['max_cav'] > 1:
+            if max_cav_limit > 1:
                 for i, route_dir in enumerate(scene_dict['other_egos']):
+                    if loaded_cavs >= max_cav_limit:
+                        break
                     visible_actors['car_{}'.format(i+1)] = self.get_visible_actors_one_term(route_dir, frame_id)
-                for i, rsu_dir in enumerate(scene_dict['rsu']):
-                    visible_actors['rsu_{}'.format(i)] = self.get_visible_actors_one_term(rsu_dir, frame_id)
+                    loaded_cavs += 1
+                if loaded_cavs < max_cav_limit and len(scene_dict['rsu']) > 0:
+                    for i, rsu_dir in enumerate(scene_dict['rsu']):
+                        if loaded_cavs >= max_cav_limit:
+                            break
+                        visible_actors['rsu_{}'.format(i)] = self.get_visible_actors_one_term(rsu_dir, frame_id)
+                        loaded_cavs += 1
             for keys in visible_actors:
                 visible_actors[keys] = list(set(visible_actors[keys]))
         return visible_actors
@@ -511,17 +528,26 @@ class V2XVERSEBaseDataset(Dataset):
             visible_actors = self.get_visible_actors(scene_dict, frame_id)
             data = OrderedDict()
             data['car_0'] = self.get_one_record(scene_dict['ego'], frame_id , agent='ego', visible_actors=visible_actors['car_0'], tpe=tpe)
-            if self.params['train_params']['max_cav'] > 1:
+            loaded_cavs = 1
+            max_cav_limit = self.params['train_params']['max_cav']
+            if max_cav_limit > 1:
                 for i, route_dir in enumerate(scene_dict['other_egos']):
+                    if loaded_cavs >= max_cav_limit:
+                        break
                     try:
                         data['car_{}'.format(i+1)] = self.get_one_record(route_dir, frame_id_latency , agent='other_ego', visible_actors=visible_actors['car_{}'.format(i+1)], tpe=tpe)
+                        loaded_cavs += 1
                     except:
                         print('load other ego failed')
                         continue
-            if self.params['train_params']['max_cav'] > 2:
+            
+            if loaded_cavs < max_cav_limit and len(scene_dict['rsu']) > 0:
                 for i, rsu_dir in enumerate(scene_dict['rsu']):
+                    if loaded_cavs >= max_cav_limit:
+                        break
                     try:
                         data['rsu_{}'.format(i)] = self.get_one_record(rsu_dir, frame_id_latency, agent='rsu', visible_actors=visible_actors['rsu_{}'.format(i)], tpe=tpe)
+                        loaded_cavs += 1
                     except:
                         print('load rsu failed')
                         continue
@@ -530,12 +556,20 @@ class V2XVERSEBaseDataset(Dataset):
             scene_dict = None
             frame_id = None
             data['car_0'] = self.get_one_record(route_dir=None, frame_id=None , agent='ego', visible_actors=None, tpe=tpe, extra_source=extra_source['car_data'][0])
-            if self.params['train_params']['max_cav'] > 1:
+            loaded_cavs = 1
+            max_cav_limit = self.params['train_params']['max_cav']
+            if max_cav_limit > 1:
                 if len(extra_source['car_data']) > 1:
                     for i in range(len(extra_source['car_data'])-1):
+                        if loaded_cavs >= max_cav_limit:
+                            break
                         data['car_{}'.format(i+1)] = self.get_one_record(route_dir=None, frame_id=None , agent='other_ego', visible_actors=None, tpe=tpe, extra_source=extra_source['car_data'][i+1])
+                        loaded_cavs += 1
                 for i in range(len(extra_source['rsu_data'])):
+                    if loaded_cavs >= max_cav_limit:
+                        break
                     data['rsu_{}'.format(i)] = self.get_one_record(route_dir=None, frame_id=None , agent='rsu', visible_actors=None, tpe=tpe, extra_source=extra_source['rsu_data'][i])            
+                    loaded_cavs += 1
         data['car_0']['scene_dict'] = scene_dict
         data['car_0']['frame_id'] = frame_id
         return data
