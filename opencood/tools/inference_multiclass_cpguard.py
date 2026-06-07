@@ -26,12 +26,19 @@ added:
 """
 
 import argparse
+import json
 import os
 import importlib
+import random
 
 import numpy as np
 import torch
-from torch.utils.data import DataLoader
+import cv2
+from torch.utils.data import DataLoader, Subset
+
+# Restrict thread spawning to prevent OOM/CPU kills
+torch.set_num_threads(2)
+cv2.setNumThreads(0)
 
 import opencood.hypes_yaml.yaml_utils as yaml_utils
 from opencood.tools import train_utils, inference_utils
@@ -70,11 +77,15 @@ def test_parser():
     # CP-Guard parameters
     parser.add_argument('--n_upper', type=int, default=5,
                         help='PASAC: max benign collaborators (default 5)')
-    parser.add_argument('--eps', type=float, default=0.08,
-                        help='PASAC: CCLoss acceptance threshold (default 0.08)')
+    parser.add_argument('--eps', type=float, nargs='+', default=[0.08],
+                        help='CP-Guard CCLoss threshold(s)')
     parser.add_argument('--no_pasac', action='store_true',
                         help='Bypass PASAC filtering: accept all collaborators. '
                              'Use to verify fusion pipeline and establish a no-attack baseline.')
+    parser.add_argument('--log_frames', action='store_true',
+                        help='Save per-frame CP-Guard log to JSON (for FDR analysis)')
+    parser.add_argument('--max_frames', type=int, default=-1,
+                        help='Stop after this many frames (-1 = all)')
     return parser.parse_args()
 
 
@@ -157,7 +168,7 @@ def main():
     saved_path = opt.model_dir
     resume_epoch, model = train_utils.load_saved_model(saved_path, model)
     print(f'Resumed from epoch {resume_epoch}')
-    opt.note += f'_epoch{resume_epoch}_cpguard_eps{opt.eps}_N{opt.n_upper}'
+    opt.note += f'_epoch{resume_epoch}_N{opt.n_upper}'
 
     if torch.cuda.is_available():
         model.cuda()
@@ -165,39 +176,53 @@ def main():
 
     np.random.seed(30330)
     torch.manual_seed(10000)
+    torch.backends.cudnn.benchmark = True
 
     print('Building dataset')
-    opencood_dataset = build_dataset(hypes, visualize=True, train=False)
+    ds = build_dataset(hypes, visualize=True, train=False)
+
+    if opt.max_frames > 0:
+        _rng = random.Random(42)
+        _indices = list(range(len(ds)))
+        _rng.shuffle(_indices)
+        _indices = _indices[:opt.max_frames]
+        _ds = Subset(ds, _indices)
+        _collate = ds.collate_batch_test
+    else:
+        _ds = ds
+        _collate = ds.collate_batch_test
+
     data_loader = DataLoader(
-        opencood_dataset,
+        _ds,
         batch_size=1,
         num_workers=4,
-        collate_fn=opencood_dataset.collate_batch_test,
+        collate_fn=_collate,
         shuffle=False,
-        pin_memory=False,
+        pin_memory=True,
         drop_last=False,
     )
 
     # Result statistics
     result_stat = {}
-    if hypes['model']['args'].get('multi_class', False):
-        for c in [0, 1, 3]:
-            result_stat[c] = {
+    for e in opt.eps:
+        result_stat[e] = {}
+        if hypes['model']['args'].get('multi_class', False):
+            for c in [0, 1, 3]:
+                result_stat[e][c] = {
+                    iou: {'tp': [], 'fp': [], 'gt': 0, 'score': []}
+                    for iou in [0.3, 0.5, 0.7]
+                }
+        else:
+            result_stat[e] = {
                 iou: {'tp': [], 'fp': [], 'gt': 0, 'score': []}
                 for iou in [0.3, 0.5, 0.7]
             }
-    else:
-        result_stat = {
-            iou: {'tp': [], 'fp': [], 'gt': 0, 'score': []}
-            for iou in [0.3, 0.5, 0.7]
-        }
 
     infer_info = opt.fusion_method + opt.note
     AP_all = {}
+    frame_logs = {e: {} for e in opt.eps}  # dict[eps][frame_idx] = log entry
 
-    file_path = os.path.join(opt.model_dir, 'AP_cpguard.txt')
-    log_file = open(file_path, 'w')
-    print(f'Results will be written to {file_path}')
+    print(f'Results will be written to {opt.model_dir}/AP_cpguard_eps*.txt')
 
     for i, batch_data in enumerate(data_loader):
         print(f'{infer_info}_{i}')
@@ -209,65 +234,77 @@ def main():
 
             if opt.fusion_method == 'intermediate':
                 # ---- CP-Guard protected path ----
-                infer_result = inference_utils.inference_intermediate_fusion_multiclass_cpguard(
-                    batch_data, model, opencood_dataset,
-                    n_upper=opt.n_upper, eps=opt.eps,
-                    no_pasac=opt.no_pasac
-                )
-            elif opt.fusion_method == 'late':
-                infer_result = inference_utils.inference_late_fusion_multiclass(
-                    batch_data, model, opencood_dataset)
-            elif opt.fusion_method == 'early':
-                infer_result = inference_utils.inference_early_fusion_multiclass(
-                    batch_data, model, opencood_dataset)
-            elif opt.fusion_method == 'no':
-                infer_result = inference_utils.inference_no_fusion_multiclass(
-                    batch_data, model, opencood_dataset, single_gt=True)
-            elif opt.fusion_method == 'no_w_uncertainty':
-                infer_result = inference_utils.inference_no_fusion_w_uncertainty(
-                    batch_data, model, opencood_dataset)
-            elif opt.fusion_method == 'single':
-                infer_result = inference_utils.inference_no_fusion(
-                    batch_data, model, opencood_dataset, single_gt=True)
+                # Auto-detect model type: CoDriving uses fuse_decode_subset,
+                # PointPillarMulticlass uses the V2XViT-style fusion path.
+                if hasattr(model, 'fuse_decode_subset'):
+                    infer_result = inference_utils.inference_intermediate_fusion_codriving_cpguard(
+                        batch_data, model, ds,
+                        n_upper=opt.n_upper, eps=opt.eps,
+                        no_pasac=opt.no_pasac
+                    )
+                else:
+                    raise NotImplementedError("Only CoDriving multi-eps is supported")
+
             else:
-                raise NotImplementedError(opt.fusion_method)
+                raise NotImplementedError("Only intermediate fusion supports multi-eps currently")
 
-            pred_box_tensor = infer_result['pred_box_tensor']
-            gt_box_tensor   = infer_result['gt_box_tensor']
-            pred_score      = infer_result['pred_score']
+            for e, result_dict in infer_result.items():
+                pred_box_tensor = result_dict['pred_box_tensor']
+                gt_box_tensor   = result_dict['gt_box_tensor']
+                pred_score      = result_dict['pred_score']
 
-            eval_utils.caluclate_tp_fp_multiclass(
-                pred_box_tensor, pred_score, gt_box_tensor, result_stat, 0.3)
-            eval_utils.caluclate_tp_fp_multiclass(
-                pred_box_tensor, pred_score, gt_box_tensor, result_stat, 0.5)
-            eval_utils.caluclate_tp_fp_multiclass(
-                pred_box_tensor, pred_score, gt_box_tensor, result_stat, 0.7)
+                if opt.log_frames and 'cpguard_log' in result_dict:
+                    frame_logs[e][i] = result_dict['cpguard_log']
+
+                eval_utils.caluclate_tp_fp_multiclass(
+                    pred_box_tensor, pred_score, gt_box_tensor, result_stat[e], 0.3)
+                eval_utils.caluclate_tp_fp_multiclass(
+                    pred_box_tensor, pred_score, gt_box_tensor, result_stat[e], 0.5)
+                eval_utils.caluclate_tp_fp_multiclass(
+                    pred_box_tensor, pred_score, gt_box_tensor, result_stat[e], 0.7)
+
+                # Visualisation only uses the first eps
+                if e == opt.eps[0] and not opt.no_score:
+                    result_dict.update({'score_tensor': pred_score})
+
+        # Incremental checkpoint every 200 frames
+        if i % 200 == 0 and opt.log_frames:
+            for e in opt.eps:
+                if frame_logs[e]:
+                    ckpt_path = os.path.join(
+                        opt.model_dir,
+                        f'frame_log_cpguard_eps{e}_{infer_info}.json'
+                    )
+                    with open(ckpt_path, 'w') as _f:
+                        json.dump(frame_logs[e], _f)
+
+            # Save / Visualize using the result of the FIRST epsilon only
+            first_eps_result = infer_result[opt.eps[0]]
+            pred_box_tensor_0 = first_eps_result['pred_box_tensor']
+            gt_box_tensor_0   = first_eps_result['gt_box_tensor']
 
             if opt.save_npy:
                 npy_save_path = os.path.join(opt.model_dir, 'npy_cpguard')
                 os.makedirs(npy_save_path, exist_ok=True)
                 inference_utils.save_prediction_gt(
-                    pred_box_tensor, gt_box_tensor,
+                    pred_box_tensor_0, gt_box_tensor_0,
                     batch_data['ego']['origin_lidar'][0],
                     i, npy_save_path
                 )
 
-            if not opt.no_score:
-                infer_result.update({'score_tensor': pred_score})
-
-            if (i % opt.save_vis_interval == 0) and (pred_box_tensor is not None):
+            if (i % opt.save_vis_interval == 0) and (pred_box_tensor_0 is not None):
                 vis_root = os.path.join(opt.model_dir, f'vis_{infer_info}')
                 os.makedirs(vis_root, exist_ok=True)
 
                 simple_vis_multiclass.visualize(
-                    infer_result,
+                    first_eps_result,
                     batch_data['ego']['origin_lidar'][0],
                     hypes['postprocess']['gt_range'],
                     os.path.join(vis_root, '3d_%05d.png' % i),
                     method='3d', left_hand=left_hand)
 
                 simple_vis_multiclass.visualize(
-                    infer_result,
+                    first_eps_result,
                     batch_data['ego']['origin_lidar'][0],
                     hypes['postprocess']['gt_range'],
                     os.path.join(vis_root, 'bev_%05d.png' % i),
@@ -276,32 +313,40 @@ def main():
         torch.cuda.empty_cache()
 
     # Final AP computation
-    all_class_results, _, _, _ = eval_utils.eval_final_results_multiclass(
-        result_stat, opt.model_dir, infer_info
-    )
-    for tpe in all_class_results:
-        if tpe not in AP_all:
-            AP_all[tpe] = {'ap30': [], 'ap50': [], 'ap70': []}
-        AP_all[tpe]['ap30'].append(all_class_results[tpe]['ap30'])
-        AP_all[tpe]['ap50'].append(all_class_results[tpe]['ap50'])
-        AP_all[tpe]['ap70'].append(all_class_results[tpe]['ap70'])
+    for e in opt.eps:
+        print(f'\n=== EPS={e} ===')
+        all_class_results, _, _, _ = eval_utils.eval_final_results_multiclass(
+            result_stat[e], opt.model_dir, f'{infer_info}_eps{e}'
+        )
+        for tpe in all_class_results:
+            if tpe not in AP_all:
+                AP_all[tpe] = {'ap30': [], 'ap50': [], 'ap70': []}
+            AP_all[tpe]['ap30'].append(all_class_results[tpe]['ap30'])
+            AP_all[tpe]['ap50'].append(all_class_results[tpe]['ap50'])
+            AP_all[tpe]['ap70'].append(all_class_results[tpe]['ap70'])
+
+        if opt.log_frames and frame_logs[e]:
+            log_path = os.path.join(opt.model_dir, f'frame_log_cpguard_eps{e}_{infer_info}.json')
+            with open(log_path, 'w') as f:
+                json.dump(frame_logs[e], f, indent=4)
+
+        file_path = os.path.join(opt.model_dir, f'AP_cpguard_eps{e}.txt')
+        with open(file_path, 'w') as log_file:
+            log_file.write(
+                'veh_ap30: {:.4f} veh_ap50: {:.4f} veh_ap70: {:.4f} '
+                'ped_ap30: {:.4f} ped_ap50: {:.4f} ped_ap70: {:.4f} '
+                'bicy_ap30: {:.4f} bicy_ap50: {:.4f} bicy_ap70: {:.4f}'.format(
+                    all_class_results[0]['ap30'], all_class_results[0]['ap50'],
+                    all_class_results[0]['ap70'],
+                    all_class_results[1]['ap30'], all_class_results[1]['ap50'],
+                    all_class_results[1]['ap70'],
+                    all_class_results[3]['ap30'], all_class_results[3]['ap50'],
+                    all_class_results[3]['ap70'],
+                )
+            )
+        print(f'Done. Results saved to {file_path}')
 
     yaml_utils.save_yaml(AP_all, os.path.join(opt.model_dir, 'AP_cpguard030507.yaml'))
-
-    log_file.write(
-        'veh_ap30: {:.4f} veh_ap50: {:.4f} veh_ap70: {:.4f} '
-        'ped_ap30: {:.4f} ped_ap50: {:.4f} ped_ap70: {:.4f} '
-        'bicy_ap30: {:.4f} bicy_ap50: {:.4f} bicy_ap70: {:.4f}'.format(
-            all_class_results[0]['ap30'], all_class_results[0]['ap50'],
-            all_class_results[0]['ap70'],
-            all_class_results[1]['ap30'], all_class_results[1]['ap50'],
-            all_class_results[1]['ap70'],
-            all_class_results[3]['ap30'], all_class_results[3]['ap50'],
-            all_class_results[3]['ap70'],
-        )
-    )
-    log_file.close()
-    print(f'Done.  Results saved to {file_path}')
 
 
 if __name__ == '__main__':

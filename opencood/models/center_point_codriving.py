@@ -187,12 +187,8 @@ class centerpointcodriving(nn.Module):
         sub_psm = psm_single[idx_t]     # [k, anchor_number, H', W']
         sub_rl  = torch.tensor([k], dtype=torch.long, device=device)
 
-        # Build a [1, k, k, 4, 4] t_matrix for the subset.
-        eye4  = torch.eye(4, device=device)
-        new_t = eye4.view(1, 1, 1, 4, 4).expand(1, k, k, 4, 4).clone()
-        for new_i, orig_i in enumerate(indices):
-            for new_j, orig_j in enumerate(indices):
-                new_t[0, new_i, new_j] = pairwise_t_matrix[0, orig_i, orig_j]
+        # Build a [1, k, k, 4, 4] t_matrix for the subset using advanced indexing
+        new_t = pairwise_t_matrix[:, idx_t][:, :, idx_t]
 
         if self.multi_scale:
             fused, _, _ = self.fusion_net(sub_raw, sub_psm, sub_rl, new_t,

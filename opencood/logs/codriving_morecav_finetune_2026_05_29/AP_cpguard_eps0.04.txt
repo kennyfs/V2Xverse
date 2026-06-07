@@ -1,0 +1,1 @@
+veh_ap30: 0.5078 veh_ap50: 0.4818 veh_ap70: 0.4068 ped_ap30: 0.5253 ped_ap50: 0.3026 ped_ap70: 0.0291 bicy_ap30: 0.5963 bicy_ap50: 0.4507 bicy_ap70: 0.2474

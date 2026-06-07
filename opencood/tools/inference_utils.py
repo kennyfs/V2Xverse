@@ -418,7 +418,7 @@ def inference_intermediate_fusion_multiclass_cpguard(
     # ------------------------------------------------------------------
     # Phase 1: encode all CAVs (once)
     # ------------------------------------------------------------------
-    spatial_features_2d, t_matrix_norm, record_len = model.encode(cav_content)
+    spatial_features_2d, _, t_matrix_norm, record_len = model.encode(cav_content)
     # spatial_features_2d : [N_cavs, C, H, W]  index 0 = ego
     # t_matrix_norm       : [1, max_cav, max_cav, 2, 3]
 
@@ -447,22 +447,11 @@ def inference_intermediate_fusion_multiclass_cpguard(
     # ------------------------------------------------------------------
     # Phase 2: reference prediction Y_0
     #
-    # CP-Guard originally uses ego-solo as Y_0, but for detection this
-    # fails: collaborative fusion discovers new objects the ego can't see,
-    # so ego-solo and collaborative outputs legitimately diverge even with
-    # all-benign collaborators.  Low CCLoss ≤ eps causes PASAC to reject
-    # every collaborator and degrade to ego-only.
-    #
-    # Fix: use full-group fusion as Y_0.  PASAC then detects collaborators
-    # that deviate from the group consensus (outlier = malicious), rather
-    # than from the ego alone.  With no attacks (benign-only baseline),
-    # every subset agrees with the full-group → all accepted.
+    # Following the original CP-Guard paper, we use the ego-solo prediction
+    # as the reference Y_0. Collaborators are verified against this reference.
     # ------------------------------------------------------------------
     with torch.no_grad():
-        if collab_indices:
-            Y_0 = fuse_decode_fn([0] + collab_indices)   # full-group reference
-        else:
-            Y_0 = torch.sigmoid(model.cls_head(spatial_features_2d[0:1]))
+        Y_0 = torch.sigmoid(model.cls_head(spatial_features_2d[0:1]))
 
     # ------------------------------------------------------------------
     # Phase 2 (cont.): PASAC — find benign collaborators
@@ -539,8 +528,158 @@ def inference_intermediate_fusion_multiclass_cpguard(
         'pred_box_tensor': pred_box_tensor,
         'pred_score':      pred_score,
         'gt_box_tensor':   gt_box_tensor,
+        'cpguard_log':     {
+            'collab_indices': collab_indices,
+            'benign_collab': benign_collab
+        }
     }
 
+
+def inference_intermediate_fusion_codriving_cpguard(
+        batch_data,
+        model,
+        dataset,
+        n_upper: int = 5,
+        eps: float = 0.08,
+        online_eval_only: bool = False,
+        no_pasac: bool = False):
+    """
+    CP-Guard-protected inference for CoDriving (CenterPointCoDriving) model.
+
+    Mirrors inference_intermediate_fusion_multiclass_cpguard() but adapted
+    for CoDriving's encode()/fuse_decode_subset() API (which differs from
+    PointPillarMulticlass in that encode() returns raw scatter features +
+    psm_single, and fusion goes through multi-scale AttenFusion).
+
+    Parameters
+    ----------
+    batch_data : dict
+        Standard dataloader batch (contains 'ego' key).
+    model : CenterPointCoDriving
+        Must expose encode() and fuse_decode_subset().
+    dataset : IntermediatemulticlassFusionDataset
+    n_upper : int
+        Maximum number of benign collaborators PASAC may accept (default 5).
+    eps : float
+        CCLoss threshold (default 0.08, optimal per CP-Guard Table 2).
+    online_eval_only : bool
+        Passed through to dataset.post_process_multiclass.
+    no_pasac : bool
+        Bypass PASAC filtering; accept all collaborators.
+
+    Returns
+    -------
+    dict with keys pred_box_tensor, pred_score, gt_box_tensor.
+    """
+    import torch.nn.functional as F
+    from collections import OrderedDict
+    from opencood.defense.cp_guard import compute_ccloss, pasac
+
+    eps_list = eps if isinstance(eps, list) else [eps]
+
+    cav_content = batch_data['ego']
+    device = next(model.parameters()).device
+
+    # ------------------------------------------------------------------
+    # Phase 1: encode all CAVs (once)
+    # ------------------------------------------------------------------
+    raw_features, psm_single, pairwise_t_matrix, record_len = \
+        model.encode(cav_content)
+
+    N_cavs = int(record_len[0].item())
+    collab_indices = list(range(1, N_cavs))
+
+    # ------------------------------------------------------------------
+    # Helper: fuse pre-encoded subset + decode to sigmoid cls_preds
+    # ------------------------------------------------------------------
+    subset_cache = {}
+    def fuse_decode_fn(indices):
+        key = tuple(indices)
+        if key not in subset_cache:
+            with torch.no_grad():
+                cls, _, _ = model.fuse_decode_subset(
+                    raw_features, psm_single, pairwise_t_matrix, record_len,
+                    indices
+                )
+            subset_cache[key] = torch.sigmoid(cls)
+        return subset_cache[key]
+
+    # ------------------------------------------------------------------
+    # Phase 2: reference prediction Y_0 (ego-solo, per CP-Guard paper)
+    # ------------------------------------------------------------------
+    Y_0 = fuse_decode_fn([0])
+
+    results = {}
+    for e in eps_list:
+        # ------------------------------------------------------------------
+        # Phase 2 (cont.): PASAC — find benign collaborators
+        # ------------------------------------------------------------------
+        if no_pasac:
+            benign_collab = collab_indices[:]
+        elif collab_indices:
+            benign_collab = pasac(
+                collab_indices, Y_0, fuse_decode_fn,
+                n_upper=n_upper, eps=e
+            )
+        else:
+            benign_collab = []
+
+        print(f'[CPGuard-CoDriving EPS={e}] CAVs={N_cavs}  collab={collab_indices}  '
+              f'benign={benign_collab}  ego_only={len(benign_collab)==0}')
+
+        # ------------------------------------------------------------------
+        # Phase 3: final decode with ego + benign collaborators
+        # ------------------------------------------------------------------
+        final_indices = [0] + benign_collab
+
+        with torch.no_grad():
+            cls, bbox, fused = model.fuse_decode_subset(
+                raw_features, psm_single, pairwise_t_matrix, record_len,
+                final_indices
+            )
+
+        # Scale fused feature for downstream planning if needed
+        if fused.size(2) == 48:
+            scaled_feature = F.interpolate(fused, scale_factor=2, mode='nearest')
+        else:
+            scaled_feature = fused
+
+        # Build per-class reg_preds_multiclass tensor expected by post_process
+        box_preds_hwc = bbox.permute(0, 2, 3, 1).contiguous()
+        B, H, W, _ = box_preds_hwc.shape
+        num_class = int(box_preds_hwc.shape[3] / 8)
+        box_preds_hwc = box_preds_hwc.view(B, H, W, num_class, 8)
+        bbox_temp_list = []
+        for i in range(num_class):
+            bpi = box_preds_hwc[:, :, :, i, :].permute(0, 3, 1, 2)
+            _, bt = model.generate_predicted_boxes(cls[:, i, :, :], bpi)
+            bbox_temp_list.append(bt)
+        reg_preds_multiclass = torch.stack(bbox_temp_list, dim=1)
+
+        output_dict = OrderedDict()
+        output_dict['ego'] = {
+            'cls_preds':            cls,
+            'bbox_preds':           bbox,
+            'reg_preds_multiclass': reg_preds_multiclass,
+            'fused_feature':        scaled_feature,
+        }
+
+        pred_box_tensor, pred_score, gt_box_tensor = \
+            dataset.post_process_multiclass(
+                {'ego': batch_data['ego']}, output_dict, online_eval_only
+            )
+
+        results[e] = {
+            'pred_box_tensor': pred_box_tensor,
+            'pred_score':      pred_score,
+            'gt_box_tensor':   gt_box_tensor,
+            'cpguard_log':     {
+                'collab_indices': collab_indices,
+                'benign_collab': benign_collab
+            }
+        }
+
+    return results if isinstance(eps, list) else results[eps]
 
 def save_prediction_gt(pred_tensor, gt_tensor, pcd, timestamp, save_path):
     """

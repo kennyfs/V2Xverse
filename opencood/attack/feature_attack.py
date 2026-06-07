@@ -195,16 +195,12 @@ def _pgd(model, raw_features, psm_single, t_matrix, rl,
 def _build_perturbed(raw_features, attacker_idx, delta):
     """
     Construct a perturbed feature tensor with gradient only through delta.
-    Builds each row separately to avoid in-place modification issues.
+    Uses vectorized broadcasting to avoid slow loops and in-place autograd issues.
     """
     N = raw_features.shape[0]
-    rows = []
-    for i in range(N):
-        if i == attacker_idx:
-            rows.append((raw_features[i].detach() + delta).unsqueeze(0))
-        else:
-            rows.append(raw_features[i].detach().unsqueeze(0))
-    return torch.cat(rows, dim=0)
+    mask = torch.zeros(N, 1, 1, 1, device=delta.device)
+    mask[attacker_idx] = 1.0
+    return raw_features.detach() + delta.unsqueeze(0) * mask
 
 
 def _attack_loss(cls_out, goal, ego_heatmap):
